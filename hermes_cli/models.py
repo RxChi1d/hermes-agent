@@ -562,6 +562,21 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "google/gemini-3-pro-preview",
         "google/gemini-3-flash-preview",
     ],
+    # ClinePass — subscription access to curated open coding models.
+    # Served at https://api.cline.bot/api/v1 as OpenAI-compatible chat completions.
+    # Model IDs use the cline-pass/<slug> namespace (see ClinePass docs).
+    "clinepass": [
+        "cline-pass/glm-5.2",
+        "cline-pass/kimi-k2.7-code",
+        "cline-pass/kimi-k2.6",
+        "cline-pass/deepseek-v4-pro",
+        "cline-pass/deepseek-v4-flash",
+        "cline-pass/mimo-v2.5",
+        "cline-pass/mimo-v2.5-pro",
+        "cline-pass/minimax-m3",
+        "cline-pass/qwen3.7-max",
+        "cline-pass/qwen3.7-plus",
+    ],
     # Alibaba DashScope Coding platform (coding-intl) — default endpoint.
     # Supports Qwen models + third-party providers (GLM, Kimi, MiniMax).
     # Users with classic DashScope keys should override DASHSCOPE_BASE_URL
@@ -1361,6 +1376,7 @@ _PROVIDER_ALIASES = {
     "claude": "anthropic",
     "claude-code": "anthropic",
     "deep-seek": "deepseek",
+    "cline-pass": "clinepass",
     "opencode": "opencode-zen",
     "zen": "opencode-zen",
     "go": "opencode-go",

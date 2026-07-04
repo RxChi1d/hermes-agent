@@ -54,6 +54,12 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
         is_aggregator=True,
         base_url_env_var="OPENROUTER_BASE_URL",
     ),
+    "clinepass": HermesOverlay(
+        transport="openai_chat",
+        base_url_override="https://api.cline.bot/api/v1",
+        extra_env_vars=("CLINE_API_KEY",),
+        base_url_env_var="CLINE_BASE_URL",
+    ),
     "nous": HermesOverlay(
         transport="openai_chat",
         auth_type="oauth_device_code",
@@ -274,6 +280,7 @@ class ProviderDef:
 ALIASES: Dict[str, str] = {
     # openrouter
     "openai": "openrouter",     # bare "openai" → route through aggregator
+    "cline-pass": "clinepass",
 
     # zai
     "glm": "zai",
@@ -414,6 +421,7 @@ _LABEL_OVERRIDES: Dict[str, str] = {
     "moa": "Mixture of Agents",
     "nous": "Nous Portal",
     "openai-codex": "ChatGPT or Codex Subscription",
+    "clinepass": "ClinePass",
     "copilot-acp": "GitHub Copilot ACP",
     "stepfun": "StepFun Step Plan",
     "xiaomi": "Xiaomi MiMo",

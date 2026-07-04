@@ -5081,12 +5081,33 @@ class AIAgent:
                 pool=10.0,
             )
 
+            # ClinePass wraps non-streaming responses in a {"data", "success"}
+            # envelope; mount a transport that unwraps it so the OpenAI SDK
+            # sees top-level choices. Only the ClinePass host is affected —
+            # every other provider keeps the plain transport and the
+            # #54049/#12952 no-socket_options streaming fix. A mounted
+            # transport overrides the client-level ``proxy=``, so the ClinePass
+            # mounts carry ``_proxy`` themselves to keep HTTPS_PROXY / NO_PROXY
+            # egress working.
+            #
             # When _proxy is None (NO_PROXY bypass or no proxy configured),
             # mount plain transports to prevent httpx from reading env proxy
             # vars and creating an HTTPProxy mount that would bypass our
             # NO_PROXY resolution.
+            from agent.clinepass_transport import (
+                build_clinepass_transport,
+                is_clinepass_base_url,
+            )
+            _is_clinepass = is_clinepass_base_url(base_url)
             _mounts = {}
-            if _proxy is None:
+            if _is_clinepass:
+                _mounts = {
+                    "http://": _httpx.HTTPTransport(verify=verify, proxy=_proxy),
+                    "https://": build_clinepass_transport(
+                        async_mode=False, verify=verify, proxy=_proxy
+                    ),
+                }
+            elif _proxy is None:
                 _mounts = {
                     "http://": _httpx.HTTPTransport(verify=verify),
                     "https://": _httpx.HTTPTransport(verify=verify),

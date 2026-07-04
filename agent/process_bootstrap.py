@@ -184,8 +184,27 @@ def build_keepalive_http_client(
 
         transport_cls = httpx.AsyncHTTPTransport if async_mode else httpx.HTTPTransport
         client_cls = httpx.AsyncClient if async_mode else httpx.Client
+        # ClinePass wraps non-streaming responses in a {"data", "success"}
+        # envelope; mount a transport that unwraps it so the OpenAI SDK sees
+        # top-level choices. Only the ClinePass host is affected — every other
+        # provider keeps the plain keepalive transport and the #54049/#12952
+        # no-socket_options streaming fix. A mounted transport overrides the
+        # client-level ``proxy=``, so the ClinePass mounts carry ``proxy``
+        # themselves to keep HTTPS_PROXY / NO_PROXY egress working.
+        from agent.clinepass_transport import (
+            build_clinepass_transport,
+            is_clinepass_base_url,
+        )
+        is_clinepass = is_clinepass_base_url(base_url)
         mounts = {}
-        if proxy is None:
+        if is_clinepass:
+            mounts = {
+                "http://": transport_cls(verify=verify, proxy=proxy),
+                "https://": build_clinepass_transport(
+                    async_mode=async_mode, verify=verify, proxy=proxy
+                ),
+            }
+        elif proxy is None:
             mounts = {
                 "http://": transport_cls(verify=verify),
                 "https://": transport_cls(verify=verify),
