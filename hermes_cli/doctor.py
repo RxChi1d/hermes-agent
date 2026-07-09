@@ -1314,6 +1314,10 @@ def run_doctor(args):
                 # is exclusively ``vendor/model`` slugs (Qwen/Qwen3.5-…,
                 # meta-llama/Llama-3-…, anthropic/claude-opus-4-7, …).
                 "deepinfra",
+                # ClinePass namespaces its own models as ``cline-pass/<slug>``
+                # (per its docs / models.py catalog); the "/" is the provider's
+                # own namespace, not a misplaced aggregator slug.
+                "clinepass",
             }
             provider_accepts_vendor_slug = (
                 provider_policy_id in providers_accepting_vendor_slugs
