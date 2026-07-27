@@ -40,6 +40,10 @@ _KNOWN_DELIVERY_PLATFORMS = frozenset({
 # deliver=origin destination.
 _NON_PUSH_ORIGIN_PLATFORMS = frozenset({"api_server"})
 
+# Platforms whose ``chat_type="thread"`` origin is always shared. Slack threads
+# may be rooted in a DM, so it remains fail-closed.
+_THREAD_ALWAYS_SHARED_PLATFORMS = frozenset({"discord"})
+
 # Platforms supporting a cron/notification home target -> env var used by gateway config.
 _HOME_TARGET_ENV_VARS = {
     "matrix": "MATRIX_HOME_ROOM",
@@ -1726,12 +1730,21 @@ def _attempt_delivery_fallback(
         "thread_id": t.thread_id,
     }
     origin = t.origin if t.origin_target else {}
+    # A missing/unknown origin chat_type is treated as potentially private. Only
+    # positively shared origins may escalate to the platform home channel.
+    suppress_home = False
+    if t.origin_target:
+        chat_type = str(origin.get("chat_type", "")).strip().lower()
+        shared = chat_type in ("group", "channel", "forum") or (
+            chat_type == "thread" and t.platform_name.lower() in _THREAD_ALWAYS_SHARED_PLATFORMS
+        )
+        suppress_home = not shared
     fallback_targets = build_fallback_targets(
         target,
         parent_chat_id=origin.get("parent_chat_id"),
         home_chat_id=_get_home_target_chat_id(t.platform_name),
         home_thread_id=_get_home_target_thread_id(t.platform_name),
-        is_direct_message=t.is_dm_target if t.origin_target else False,
+        is_direct_message=suppress_home,
     )
     if not fallback_targets:
         return False, None
@@ -1757,7 +1770,7 @@ def _attempt_delivery_fallback(
             return True, None
 
         logger.warning(
-            "Job '%s': %s target %s is undeliverable (%s); retrying %s channel %s",
+            "Job '%s': target %s is undeliverable (%s); retrying %s channel %s",
             t.job["id"], t.where, error, kind, candidate["chat_id"],
         )
         fallback_t = replace(
