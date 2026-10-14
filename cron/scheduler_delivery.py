@@ -18,7 +18,7 @@ import shutil
 import subprocess
 import sys
 import threading
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any, List, Optional
 
 
@@ -37,10 +37,6 @@ _KNOWN_DELIVERY_PLATFORMS = frozenset({
 # only, ``send()`` is a stub) — a cron report can never reach them, so they are never a
 # deliver=origin destination.
 _NON_PUSH_ORIGIN_PLATFORMS = frozenset({"api_server"})
-
-# Platforms whose ``chat_type="thread"`` origin is always shared. Slack threads
-# may be rooted in a DM, so it remains fail-closed.
-_THREAD_ALWAYS_SHARED_PLATFORMS = frozenset({"discord"})
 
 # Platforms supporting a cron/notification home target -> env var used by gateway config.
 _HOME_TARGET_ENV_VARS = {
@@ -969,7 +965,7 @@ def _deliver_to_bot_chat(job: dict, content: str, profile: str, *, deferred: Opt
                 # Deferred ids double as live-owner delivery ids, which must be 32-64 hex
                 # chars (tools.bot_live_delivery._delivery_id) — so the marker's id is a
                 # fresh digest derived from the execution key, not a suffixed one.
-                marker_key = hashlib.sha256(f"{key}:degraded".encode("utf-8")).hexdigest()
+                marker_key = hashlib.sha256(f"{key}:degraded".encode()).hexdigest()
                 _defer_marker(marker_key, dict(job), marker, profile, home,
                               for_failure=for_failure, degraded=True)
                 marker_queued = True
@@ -1061,7 +1057,7 @@ def _resolve_bot_chat_target(job: dict, profile_arg: str) -> Optional[dict]:
         return None
 
 
-def _expand_routing_tokens(part: str) -> List[str]:
+def _expand_routing_tokens(part: str) -> list[str]:
     """Expand ``all`` to every home-target platform with a configured chat_id; non-tokens pass
     through as a single-element list."""
     if part.lower() not in _ROUTING_TOKENS:
@@ -1080,7 +1076,7 @@ def _delivery_lane_value(job: dict, *, for_failure: bool = False):
     return job.get("deliver", "local")
 
 
-def _resolve_delivery_targets(job: dict, *, for_failure: bool = False) -> List[dict]:
+def _resolve_delivery_targets(job: dict, *, for_failure: bool = False) -> list[dict]:
     """Resolve auto-delivery targets from comma-separated ``deliver``; ``all`` expands to every
     platform with a home channel and combines with explicit targets. Dedup by (platform, chat_id,
     thread_id). ``for_failure=True`` (failure summaries, interrupted-run notices, drift/preflight
@@ -1779,105 +1775,6 @@ def _standalone_send(
         return _failed(e)
 
 
-def _attempt_delivery_fallback(
-    t: _TargetDelivery,
-    content: str,
-    media_files: list,
-    error: object,
-    sent_keys: set,
-) -> tuple[bool, Optional[str]]:
-    """Retry a definitively dead target at its parent channel, then platform home.
-
-    Unknown, timeout, rate-limit and server failures remain on the normal error path:
-    redirecting those could duplicate a message that was already accepted upstream.
-    """
-    from cron.delivery_fallback import (
-        build_fallback_targets,
-        format_fallback_notice,
-        is_definitive_delivery_failure,
-    )
-
-    if not is_definitive_delivery_failure(error):
-        return False, None
-
-    target = {
-        "platform": t.platform_name,
-        "chat_id": str(t.chat_id),
-        "thread_id": t.thread_id,
-    }
-    origin = t.origin if t.origin_target else {}
-    # A missing/unknown origin chat_type is treated as potentially private. Only
-    # positively shared origins may escalate to the platform home channel.
-    suppress_home = False
-    if t.origin_target:
-        chat_type = str(origin.get("chat_type", "")).strip().lower()
-        shared = chat_type in ("group", "channel", "forum") or (
-            chat_type == "thread" and t.platform_name.lower() in _THREAD_ALWAYS_SHARED_PLATFORMS
-        )
-        suppress_home = not shared
-    fallback_targets = build_fallback_targets(
-        target,
-        parent_chat_id=origin.get("parent_chat_id"),
-        home_chat_id=_get_home_target_chat_id(t.platform_name),
-        home_thread_id=_get_home_target_thread_id(t.platform_name),
-        is_direct_message=suppress_home,
-    )
-    if not fallback_targets:
-        return False, None
-
-    def _key(candidate: dict) -> tuple:
-        thread_id = candidate.get("thread_id")
-        return (
-            str(candidate.get("platform", "")).lower(),
-            str(candidate.get("chat_id", "")),
-            str(thread_id) if thread_id is not None else "",
-        )
-
-    prefix = f"delivery to {t.where} failed: {error}; "
-    last_error = error
-    for candidate in fallback_targets:
-        candidate_key = _key(candidate)
-        kind = candidate.get("fallback_kind", "fallback")
-        if candidate_key in sent_keys:
-            logger.info(
-                "Job '%s': %s fallback to %s skipped — content already delivered there this run",
-                t.job["id"], kind, candidate["chat_id"],
-            )
-            return True, None
-
-        logger.warning(
-            "Job '%s': target %s is undeliverable (%s); retrying %s channel %s",
-            t.job["id"], t.where, error, kind, candidate["chat_id"],
-        )
-        fallback_t = replace(
-            t,
-            chat_id=str(candidate["chat_id"]),
-            thread_id=candidate.get("thread_id"),
-        )
-        notice = format_fallback_notice(content, kind)
-        result, err = _standalone_send(fallback_t, notice, media_files)
-        if err is None and result and result.get("error"):
-            err = result["error"]
-        if err is not None:
-            last_error = err
-            if is_definitive_delivery_failure(err):
-                continue
-            message = f"{prefix}{kind} fallback to {candidate['chat_id']} failed: {err}"
-            logger.error("Job '%s': %s", t.job["id"], message)
-            return True, message
-
-        sent_keys.add(candidate_key)
-        logger.info(
-            "Job '%s': delivered to %s:%s after %s fallback from %s",
-            t.job["id"], candidate["platform"], candidate["chat_id"], kind, t.where,
-        )
-        return True, None
-
-    message = f"{prefix}all fallbacks failed; last error: {last_error}"
-    logger.error("Job '%s': %s", t.job["id"], message)
-    return True, message
-
-
 def _queue_for_live_reconnect(t: _TargetDelivery, content: str, media_files: list, delivery_errors: list) -> None:
     """Hand a payload the live lane rejected as reconnect-only (``send_path_degraded``) and the
     standalone lane then failed to send to the delivery ledger, as a failed reconnect-only row
@@ -1909,7 +1806,6 @@ def _queue_for_live_reconnect(t: _TargetDelivery, content: str, media_files: lis
 
 def _deliver_standalone(
     t: _TargetDelivery, content: str, media_files: list, target_errors: list, delivery_errors: list,
-    fallback_sent_keys: Optional[set] = None,
 ) -> None:
     """Standalone fallback for a target the live lane did not deliver."""
     job = t.job
@@ -1925,15 +1821,6 @@ def _deliver_standalone(
         err = f"delivery error: {result['error']} (target {t.where})"
         logger.error("Job '%s': %s", job["id"], err)
     if err is not None:
-        if fallback_sent_keys is None:
-            fallback_sent_keys = set()
-        handled, fallback_error = _attempt_delivery_fallback(
-            t, content, media_files, err, fallback_sent_keys)
-        if handled:
-            if fallback_error:
-                target_errors.append(fallback_error)
-                delivery_errors.extend(target_errors)
-            return
         target_errors.append(err)
         delivery_errors.extend(target_errors)
         # A satellite profile's worker has no platform token, so standalone cannot stand in for a
@@ -2189,9 +2076,6 @@ def _deliver_result(
 
     delivery_errors = []
     suppressed_targets = 0  # local: `job` is snapshotted into durable deferred records mid-loop
-    # A single run may have multiple stale targets. Avoid sending identical fallback content
-    # to the same parent/home destination more than once.
-    fallback_sent_keys: set = set()
     for target in targets:
         # A failure notice for a platform that hides warning notifications is a suppressed
         # disposition, not a send; requested (non-failure) results are never gated.
@@ -2227,8 +2111,7 @@ def _deliver_result(
         )
         if not delivered:
             _deliver_standalone(
-                t, cleaned_delivery_content, media_files, target_errors, delivery_errors,
-                fallback_sent_keys=fallback_sent_keys)
+                t, cleaned_delivery_content, media_files, target_errors, delivery_errors)
 
     # Filter-time drops apply to every target; report them once. A run whose every target was
     # suppressed sent nothing, so there is no drop to report.
@@ -2242,7 +2125,7 @@ def _deliver_result(
 
 # Late-bound origin namespace (see module docstring). Imported LAST so this module is fully
 # populated before ``scheduler`` re-exports from it.
-from cron import scheduler as _sched  # noqa: E402
-from cron import scheduler_delivery_origin as _origin  # noqa: E402
-from cron import scheduler_preflight as _preflight  # noqa: E402
-from cron import scheduler_script as _script  # noqa: E402
+from cron import scheduler as _sched
+from cron import scheduler_delivery_origin as _origin
+from cron import scheduler_preflight as _preflight
+from cron import scheduler_script as _script
