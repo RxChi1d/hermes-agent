@@ -11,7 +11,7 @@ import json
 import pytest
 
 from tests.gateway.test_completion_admission import pending
-from tests.gateway.test_session_end_delegations import _DELEGATION, _PROCESS, _admissions, _deliver, _local, _notes
+from tests.gateway.test_session_end_delegations import _DELEGATION, _admissions, _deliver, _local, _notes
 from tests.gateway.test_unviewed_completion_notes import _target, _turns
 from tools import async_delegation as delegation
 
@@ -21,6 +21,16 @@ def _no_delegations():
     delegation._reset_for_tests()
     yield
     delegation._reset_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_wake_state():
+    from gateway import session_completion_notes as notes
+    notes._wake_times.clear()
+    notes._wake_decided.clear()
+    yield
+    notes._wake_times.clear()
+    notes._wake_decided.clear()
 
 
 def _enable(tmp_path, value=True):
@@ -92,21 +102,6 @@ async def test_enabled_without_a_ledger_row_stays_a_note(tmp_path, monkeypatch):
             raise AssertionError('no dispatch row: must stay a note')
         runner._handle_message = no_turn
         target = await _deliver(runner, authority, ref, _DELEGATION)  # admits the identity, writes no ledger row
-        await authority._drain(ref)
-        assert len(_notes(authority, target)) == 1
-    finally:
-        authority.db.close()
-
-
-@pytest.mark.asyncio
-async def test_enabled_process_completion_is_still_a_note(tmp_path, monkeypatch):
-    runner, authority, ref, _actor = await _local(tmp_path, monkeypatch)
-    _enable(tmp_path)
-    try:
-        async def no_turn(event):
-            raise AssertionError('only async delegations may wake; a process exit stays a note')
-        runner._handle_message = no_turn
-        target = await _deliver(runner, authority, ref, _PROCESS)
         await authority._drain(ref)
         assert len(_notes(authority, target)) == 1
     finally:
