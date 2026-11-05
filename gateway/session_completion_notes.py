@@ -13,7 +13,10 @@ except a local cron result, which is always a note; messaging, Kanban, ``/loop``
 never reach here.
 """
 import json
+import logging
 from functools import partial
+
+logger = logging.getLogger(__name__)
 
 # ``_completion_delivery_identity`` kinds: an async delegation's result, a background process's exit
 # and its watch-pattern notices.
@@ -49,6 +52,30 @@ async def reopen_for_turn(authority, ref):
     await tracked_write(authority, partial(reopen, authority, ref))
 
 
+def _wakes_without_viewer(authority, ref, descriptor):
+    """Local patch Q (upstream #143649): ``delegation.wake_unviewed_completion`` (owning profile's
+    config.yaml, default false = upstream LC-7). When on, an async delegation's completion runs the
+    parent as a turn even with no viewer, but only if the dispatch itself is on record (the ledger
+    row is the authorization) and the conversation was not ended by the user. Never cron, process
+    or watch notices."""
+    if _producer(descriptor['identity']) != 'async_delegation':
+        return False
+    try:
+        from gateway.session_policy import profile_config
+        section = profile_config(authority).get('delegation')
+        from utils import is_truthy_value
+        if not (isinstance(section, dict) and is_truthy_value(section.get('wake_unviewed_completion', False))):
+            return False
+        from gateway.session_viewer_close import _physical_target
+        row = authority.db.get_session(_physical_target(authority, ref.session_id))
+        if row is None or row.get('ended_at'):
+            return False
+        from tools.async_delegation import get_durable_delegation
+        return get_durable_delegation(json.loads(descriptor['identity'])[1]) is not None
+    except Exception:  # fail closed: any doubt keeps the upstream note
+        return False
+
+
 async def note_if_unviewed(authority, ref, row):
     """The claimed *row*'s response when it was written as a note instead of running, else None.
     It is the FIFO head, so the note lands after every input committed before it and before every
@@ -58,10 +85,17 @@ async def note_if_unviewed(authority, ref, row):
     from gateway.session_runtime_workers import tracked_write
     live = authority.sessions.get(ref.session_id)
     descriptor = row['payload']['local_automation_v1']
-    if live is None or (live.subscribers and _producer(descriptor['identity']) not in _ALWAYS_NOTED):
+    producer = _producer(descriptor['identity'])
+    wake = (live is not None and not live.subscribers and producer not in _ALWAYS_NOTED
+            and _wakes_without_viewer(authority, ref, descriptor))
+    if wake:
+        logger.info('completion wakes parent without a viewer (delegation.wake_unviewed_completion): %s',
+                    descriptor['identity'])
+    if live is None or ((live.subscribers or wake) and producer not in _ALWAYS_NOTED):
         # The claim left a closed row closed for a note; the turn reopens it as any first turn does.
         await reopen_for_turn(authority, ref)
         return None
+    logger.info('completion stored as note, no model turn: %s', descriptor['identity'])
     from gateway.session_viewer_close import _physical_target
     metadata = {'completion_note': sorted(set(descriptor.get('identities') or ()) | {descriptor['identity']})}
     metadata.update({key: descriptor[key] for key in ('display_text', 'notification_category') if key in descriptor})
