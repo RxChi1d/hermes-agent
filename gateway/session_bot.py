@@ -208,8 +208,22 @@ async def _target(authority, actor):
     live = authority.sessions[ref.session_id]
     entry = authority.runner.session_store.lookup_by_session_key(live.route)
     if (live.source.platform != Platform.LOCAL and lane is None) or entry is None:
+        _log_conflict_context(authority, 'target', route=live.route, platform=live.source.platform,
+                              lane=lane is not None, pinned=ref.session_id,
+                              entry=getattr(entry, 'session_id', None))
         raise RuntimeStoreError('admission_conflict')
     return ref, live, entry
+
+
+def _log_conflict_context(authority, site, **ctx):
+    """Local diagnostic: ids and route keys only (no message content) when a delivery is refused."""
+    try:
+        holder = authority.db.get_session_by_title('Bot Chat')
+        tip = authority.db.get_compression_tip(holder['id']) if holder else None
+        logger.info('admission_conflict (%s): authority tip=%s gateway entry=%s %s', site, tip,
+                       ctx.pop('entry', None), ' '.join('%s=%s' % kv for kv in ctx.items()))
+    except Exception:
+        pass
 
 
 def displaceable_bot_chat(authority, row, subject=None):
@@ -854,6 +868,8 @@ async def _deliver(connection, params):
             ref, live, entry = await _target(authority, actor)
             pinned = params.get('session_id', entry.session_id)
             if pinned != entry.session_id and not _moved_aside_by_this_door(authority, holder, pinned):
+                _log_conflict_context(authority, 'deliver-pin', route=live.route, pinned=pinned,
+                                      entry=entry.session_id)
                 raise RuntimeStoreError('admission_conflict')
             return await _admit(authority, actor, home, root, key, message, ref, live, entry, author=author,
                                 notification_category=category)
