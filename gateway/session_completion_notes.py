@@ -14,9 +14,23 @@ never reach here.
 """
 import json
 import logging
+import time
 from functools import partial
 
 logger = logging.getLogger(__name__)
+
+# Ping-pong guard for unviewed wakes (local patch Q2): at most WAKE_CAP model turns per session inside
+# WAKE_WINDOW_S; the next completion is stored as a note (visible, no turn). In-memory, so a restart resets it.
+WAKE_CAP = 6
+WAKE_WINDOW_S = 600.0
+_wake_times = {}
+
+
+def _now():
+    return time.monotonic()
+
+
+_wake_decided = {}  # admission id -> decision: a re-evaluated admission neither double-counts nor flips
 
 # ``_completion_delivery_identity`` kinds: an async delegation's result, a background process's exit
 # and its watch-pattern notices.
@@ -52,13 +66,14 @@ async def reopen_for_turn(authority, ref):
     await tracked_write(authority, partial(reopen, authority, ref))
 
 
-def _wakes_without_viewer(authority, ref, descriptor):
+def _wakes_without_viewer(authority, ref, descriptor, admission_id=None):
     """Local patch Q (upstream #143649): ``delegation.wake_unviewed_completion`` (owning profile's
-    config.yaml, default false = upstream LC-7). When on, an async delegation's completion runs the
-    parent as a turn even with no viewer, but only if the dispatch itself is on record (the ledger
-    row is the authorization) and the conversation was not ended by the user. Never cron, process
-    or watch notices."""
-    if _producer(descriptor['identity']) != 'async_delegation':
+    config.yaml, default false = upstream LC-7). When on, an unviewed completion runs the parent as a
+    turn: an async delegation only if its dispatch is on record (the ledger row is the authorization),
+    a process completion because the agent registered notify_on_complete (Q2); in both the
+    conversation must not be ended by the user. Never cron results or watch notices."""
+    producer = _producer(descriptor['identity'])
+    if producer not in ('async_delegation', 'completion'):
         return False
     try:
         from gateway.session_policy import profile_config
@@ -70,8 +85,28 @@ def _wakes_without_viewer(authority, ref, descriptor):
         row = authority.db.get_session(_physical_target(authority, ref.session_id))
         if row is None or row.get('ended_at'):
             return False
-        from tools.async_delegation import get_durable_delegation
-        return get_durable_delegation(json.loads(descriptor['identity'])[1]) is not None
+        if producer == 'async_delegation':
+            from tools.async_delegation import get_durable_delegation
+            if get_durable_delegation(json.loads(descriptor['identity'])[1]) is None:
+                return False
+        # producer 'completion': only notify_on_complete processes emit one, so the agent asked for this wake
+        if admission_id in _wake_decided:
+            return _wake_decided[admission_id]
+        now = _now()
+        recent = [t for t in _wake_times.get(ref.session_id, ()) if now - t < WAKE_WINDOW_S]
+        if len(recent) >= WAKE_CAP:
+            _wake_decided[admission_id] = False
+            _wake_times[ref.session_id] = recent
+            logger.warning('unviewed wake cap reached (%d in %ds), storing as note: %s',
+                           WAKE_CAP, WAKE_WINDOW_S, descriptor['identity'])
+            return False
+        recent.append(now)
+        _wake_times[ref.session_id] = recent
+        _wake_decided[admission_id] = True
+        if len(_wake_decided) > 512:  # bounded: drop the oldest decisions
+            for key in list(_wake_decided)[:256]:
+                del _wake_decided[key]
+        return True
     except Exception:  # fail closed: any doubt keeps the upstream note
         return False
 
@@ -87,7 +122,7 @@ async def note_if_unviewed(authority, ref, row):
     descriptor = row['payload']['local_automation_v1']
     producer = _producer(descriptor['identity'])
     wake = (live is not None and not live.subscribers and producer not in _ALWAYS_NOTED
-            and _wakes_without_viewer(authority, ref, descriptor))
+            and _wakes_without_viewer(authority, ref, descriptor, row['admission_id']))
     if wake:
         logger.info('completion wakes parent without a viewer (delegation.wake_unviewed_completion): %s',
                     descriptor['identity'])
@@ -101,9 +136,18 @@ async def note_if_unviewed(authority, ref, row):
     metadata.update({key: descriptor[key] for key in ('display_text', 'notification_category') if key in descriptor})
     target = _physical_target(authority, ref.session_id)
     # Keyed by its admission: a claim is never replayed, and this keeps a write retry exact.
-    await tracked_write(authority, partial(
-        authority.db.append_completion_note, target, row['admission_id'], row['payload']['text'],
-        descriptor.get('display_kind', 'internal_notification'), metadata))
+    from hermes_state_mutation_guards import MUTATION_GUARD_REFUSALS
+    try:
+        await tracked_write(authority, partial(
+            authority.db.append_completion_note, target, row['admission_id'], row['payload']['text'],
+            descriptor.get('display_kind', 'internal_notification'), metadata))
+    except MUTATION_GUARD_REFUSALS:
+        # Local patch Q2: another process (the Desktop backend) is mid-turn on this session, so the
+        # note is refused and upstream fails the admission, dropping the result. A turn waits for the
+        # lease instead (acquire_session_turn_lease) and then reads the result.
+        logger.info('completion note refused by a live turn lease, running a turn instead: %s', descriptor['identity'])
+        await reopen_for_turn(authority, ref)
+        return None
     refresh = getattr(authority.runner, '_refresh_agent_cache_message_count', None)
     if refresh is not None:  # the owner's own row: a cached agent stays, as after a turn's writes
         await refresh(live.route, target)
