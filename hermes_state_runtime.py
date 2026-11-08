@@ -30,12 +30,33 @@ class RuntimeStoreError(ValueError):
         self.field = _one_line(field, 80)
         self.detail = _one_line(detail, 160)
         super().__init__(reason)
+        if reason == 'admission_conflict' and field != 'request_id':
+            _log_admission_conflict(self)
 
 
 #: The one ``admission_conflict`` that proves the request was already admitted: this principal's
 #: request id on this target holds an admission with another payload. Every other conflict (route,
 #: binding, lineage) carries no such proof, so a client tells them apart by this field.
 ADMITTED_REQUEST_CONFLICT = {'field': 'request_id', 'detail': 'this request id was already admitted with another payload'}
+
+
+def _log_admission_conflict(err):
+    """One INFO line (logger ``gateway.admission_conflict`` so it reaches gateway.log) naming where an ``admission_conflict`` was raised (local patch: the gateway log
+    otherwise shows only the bare code). Never logs message content; a client's own request-id retry
+    (``field='request_id'``) is not logged."""
+    try:
+        import logging
+        import os
+        import sys
+        frame = sys._getframe(2)  # the raise site: _log -> __init__ -> caller
+        chain = []
+        while frame is not None and len(chain) < 3:
+            chain.append('%s:%d %s' % (os.path.basename(frame.f_code.co_filename), frame.f_lineno, frame.f_code.co_name))
+            frame = frame.f_back
+        logging.getLogger('gateway.admission_conflict').info('admission_conflict at %s (field=%s detail=%s)',
+                                            ' < '.join(chain), err.field, err.detail)
+    except Exception:  # diagnostics must never change the refusal
+        pass
 
 
 def _one_line(value, limit):
