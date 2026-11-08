@@ -52,15 +52,28 @@ def local_physical_target(conn, session_id):
 
 
 def _routed_entry(conn, route, tip):
-    """*route*'s routing entry while it still targets *tip*, else None."""
-    row = conn.execute("SELECT entry_json FROM gateway_routing WHERE scope='' AND session_key=?", (route,)).fetchone()
-    routed = json.loads(row[0]) if row else None
-    return routed if routed is not None and routed['session_id'] == tip else None
+    """*route*'s routing entry while it still targets *tip*, else None.
+
+    The same route can exist in more than one ``gateway_routing`` scope (``''`` for the state layer,
+    the sessions dir for a gateway store). The state layer's copy is preferred, but a row written by
+    a gateway that saved first is just as valid here: both describe the same conversation."""
+    rows = conn.execute("SELECT scope, entry_json FROM gateway_routing WHERE session_key=?", (route,)).fetchall()
+    rows.sort(key=lambda row: row[0] != '')  # scope '' first
+    for _scope, entry_json in rows:
+        routed = json.loads(entry_json)
+        if routed is not None and routed['session_id'] == tip:
+            return routed
+    return None
 
 
 def _commit_local_target(conn, receipt, routed):
-    """Store *receipt* and its route's entry *routed* and bump the logical revision, in one transaction."""
-    conn.execute("UPDATE gateway_routing SET entry_json=? WHERE scope='' AND session_key=?",
+    """Store *receipt* and its route's entry *routed* and bump the logical revision, in one transaction.
+
+    Every scope of that route moves together: advancing only the state layer's row (``scope=''``) left
+    a long-lived gateway pointing at the ended parent after another process compressed the chat, and the
+    next completion or reply was then refused with ``admission_conflict`` (issue #150056). Only rows that
+    already exist are updated; this never creates a scope."""
+    conn.execute("UPDATE gateway_routing SET entry_json=? WHERE session_key=?",
                  (_json(routed), receipt['route']))
     conn.execute('UPDATE state_meta SET value=? WHERE key=?', (_json(receipt), POLICY_PREFIX + receipt['session_id']))
     conn.execute('UPDATE sessions SET runtime_revision=runtime_revision+1 WHERE id=?', (receipt['session_id'],))
