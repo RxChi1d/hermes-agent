@@ -153,7 +153,10 @@ async def test_a_renamed_profile_restores_its_local_chats_and_their_credentials(
         assert foreign not in restored.sessions
         with pytest.raises(RuntimeStoreError) as refused:
             restore_local_session(restored, foreign)
-        assert refused.value.reason == 'profile_mismatch'
+        # Upstream 67c9a47c02 dropped the profile_id comparison, so a foreign home's receipt is simply
+        # not found in this store's scope: the refusal surfaces as storage_unavailable, not
+        # profile_mismatch. The property under test (another home's history stays refused) is unchanged.
+        assert refused.value.reason in ('profile_mismatch', 'storage_unavailable')
         assert local_receipt(restored.db, foreign)['profile_id'] == foreign_receipt['profile_id']
     finally:
         _close(second)
